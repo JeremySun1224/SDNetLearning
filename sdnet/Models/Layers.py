@@ -35,6 +35,14 @@ def seq_dropout(x, p=0, training=False):
         return F.dropout(x, p=p, training=training)
 
 
+def dropout(x, p=0, training=False):
+    # x: (batch * len * input_size) or (any other shape)
+    if do_seq_dropout and len(x.size()) == 3:  # if x is (batch * len * input_size)
+        return seq_dropout(x, p=p, training=training)
+    else:
+        return F.dropout(x, p=p, training=training)
+
+
 class CNN(nn.Module):
     def __init__(self, input_size, window_size, output_size):
         super(CNN, self).__init__()
@@ -122,7 +130,7 @@ class StackedBiRNN(nn.Module):
         super(StackedBiRNN, self).__init__()
         self.bidir_coef = 2 if bidirectional else 1
         self.num_layers = num_layers
-        self.concat_layers = num_layers
+        self.concat_layers = concat_layers
         self.hidden_size = hidden_size
         self.rnns = nn.ModuleList()
         for i in range(num_layers):
@@ -136,3 +144,109 @@ class StackedBiRNN(nn.Module):
             return self.num_layers * self.bidir_coef * self.hidden_size
         else:
             return self.bidir_coef * self.hidden_size
+
+
+    def forward(self, x, x_mask, return_list=False, x_additional=None):
+        """
+        Multi-layer Bi-RNN
+        :param x: a Float Tensor of size (batch * wordnum * input_dim).
+        :param x_mask: a Byte Tensor of mask for the input tensor (batch * wordnum).
+        :param x_additional: a Byte Tensor of mask for the additional input tensor (batch * wordnum * additional_dim).
+        :return: a Float Tensor of size (batch * wordnum * output_size).
+        """
+        hiddens = [x]
+        for i in range(self.num_layers):
+            rnn_input = hiddens[-1]
+            if i == 1 and x_additional is not None:
+                rnn_input = torch.cat((rnn_input, x_additional), dim=2)
+            if dropout_p > 0:
+                rnn_input = dropout(rnn_input, p=dropout_p, training=self.training)
+            rnn_output = self.rnns[i](rnn_input)[0]
+            hiddens.append(rnn_output)
+
+        if self.concat_layers:
+            output = torch.cat(hiddens[1:], 2)
+        else:
+            output = hiddens[-1]
+
+        if return_list:
+            return output, hiddens[1:]
+        else:
+            return output
+
+class AttentionScore(nn.Module):
+    """
+    相关性计算方法：
+        correlation_func = 1, sij = x1^Tx2
+        correlation_func = 2, sij = (Wx1)D(Wx2)
+        correlation_func = 3, sij = Relu(Wx1)DRelu(Wx2)
+        correlation_func = 4, sij = x1^TWx2
+        correlation_func = 5, sij = Relu(Wx1)DRelu(Wx2)
+    """
+    def __init__(self, input_size, hidden_size, correalition_func=1, do_similarity=False):
+        super(AttentionScore, self).__init__()
+        self.correlation_func = correalition_func
+        self.hidden_size = hidden_size  # 隐状态维度，即U矩阵的行数
+
+        # 实现公式：score(x1, x2) = ReLU(Ux1)^TDReLU(Ux2)
+        if correalition_func == 2 or correalition_func == 3:
+            self.linear = nn.Linear(input_size, hidden_size, bias=True)  # self.linear即矩阵U
+            if do_similarity:  # do_similarity控制初始化参数是否除以维度的平方根（类似Transformer中的Attention），以及是否更新D的参数
+                # 应用Parameter()将self.diagonal，即对角矩阵D，绑定到模型中，所以在训练的时候其是可优化的
+                self.diagonal = Parameter(torch.ones(1, 1, 1) / (hidden_size ** 0.5), requires_grad=False)
+            else:
+                self.diagonal = Parameter(torch.ones(1, 1, hidden_size), requires_grad=True)
+
+        if correalition_func == 4:
+            self.linear = nn.Linear(input_size, input_size, bias=False)
+
+        if correalition_func == 5:
+            self.linear = nn.Linear(input_size, hidden_size, bias=False)
+
+    def forward(self, x1, x2):
+        """
+        计算x1和x2向量组的注意力分数
+        :param x1: batch * word_num1 * dim
+        :param x2: batch * word_num2 * dim
+        :return: batch * word_num1 * word_num2
+        """
+        x1 = dropout()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

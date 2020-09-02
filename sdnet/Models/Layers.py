@@ -286,25 +286,103 @@ class Attention(nn.Module):
         return attented
 
 
+def RNN_from_opt(input_size_, hidden_size_, num_layers=1, concat_rnn=False, add_feat=0, bidirectional=True, rnn_type=nn.LSTM):
+    new_rnn = StackedBiRNN(
+        input_size=input_size_,
+        hidden_size=hidden_size_,
+        num_layers=num_layers,
+        rnn_type=rnn_type,
+        concat_layers=concat_rnn,
+        add_feat=add_feat,
+        bidirectional=bidirectional
+    )
+    output_size = hidden_size_
+    if bidirectional:
+        output_size *= 2
+    if concat_rnn:
+        output_size *= num_layers
+    return new_rnn, output_size
 
 
+"""
+    如何将问题的所有单词向量转化为一个向量，这里使用到了含参加权和技术。
+"""
 
 
+class LinearSelfAttn(nn.Module):
+    """
+        For summarizing a set of vectors into a sigle vector.
+        Self attention over a sequence: o_i = softmax(Wx_i) for x_i in X.
+    """
+
+    def __init__(self, input_size):
+        super(LinearSelfAttn, self).__init__()
+        self.linear = nn.Linear(input_size, 1)  # self.linear即参数向量b
+
+    def forward(self, x, x_mask):
+        """
+        :param x: batch * len * hidden_dim
+        :param x_mask: batch * len
+        :return: alpha
+        """
+        empty_mask = x_mask.eq(0).expand_as(x_mask)  # empty_mask中为1的位置是补齐符号<PAD>
+        x = dropout(x, p=dropout_p, training=self.training)
+        x_flat = x.contiguous().view(-1, x.size(-1))
+        scores = self.linear(x_flat).view(x.size(0), x.size(1))
+        scores.data.masked_fill_(empty_mask.data, -float('inf'))  # 将补齐符号位置的权重重置为负无穷
+        alpha = F.softmax(scores, dim=1)  # 计算softmax分数
+        return alpha
 
 
+def generate_mask(new_data, dropout_p=0.0):
+    new_data = (1 - dropout_p) * (new_data.zero_() + 1)
+    for i in range(new_data.size(0)):
+        one = random.randint(0, new_data.size(1) - 1)
+        new_data[i][one] = 1
+    mask = Variable(1.0 / (1 - dropout_p) * torch.bernoulli(new_data), requires_grad=False)  # 从Bernoulli分布中抽取二元随机数（0或1）
+    return mask
 
 
+class BilinearSeqAttn(nn.Module):
+    """
+        这个类的作用是给定n个向量x1, x2, ..., xn以及向量y，计算o_i = (x_i)^TWy，其中W为参数矩阵。
+        这相当于通过y给每个x向量计算一个权重。
+    """
+
+    def __init__(self, x_size, y_size, identity=False):
+        super(BilinearSeqAttn, self).__init__()
+        if not identity:
+            # 如果向量x和y维度不一致，需要定义维度转化矩阵self.linear
+            self.linear = nn.Linear(y_size, x_size)
+        else:
+            self.linear = None
+
+    def forward(self, x, y, x_mask):
+        empty_mask = x_mask.eq(0).expand_as(x_mask)
+        # 对x, y进行dropout
+        x = dropout(x, p=dropout_p, training=self.training)
+        y = dropout(y, p=dropout_p, training=self.training)
+        # 计算Wy
+        Wy = self.linear(y) if self.linear is not None else y
+        # 计算x^TWy
+        xWy = x.bmm(Wy.unsqueeze(2)).squeeze(2)
+        # 根据x的掩码将补齐符号位置的权重设置为负无穷
+        xWy.data.masked_fill_(empty_mask.data, -float('inf'))
+        return xWy
 
 
+# Get positional scores and scores for 'yes', 'no', 'unknow' cases
+class GetFinalScores(nn.Module):
+    """
+        GetFinalScores类产生SDNet的所有输出，包括模型预测答案在文章中每个位置开始和结束的概率，
+        以及特殊答案“是/否/没有答案”的概率。其中，“是/否/没有答案”的概率均只有一个数字，由GetFinalScores
+        自带的get_single_score函数计算。
+    """
 
-
-
-
-
-
-
-
-
+    def __init__(self, x_size, h_size):
+        super(GetFinalScores, self).__init__()
+        # 预测“没有答案/否/是”所使用的参数向量
+        pass
 
 
 

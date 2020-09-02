@@ -145,7 +145,6 @@ class StackedBiRNN(nn.Module):
         else:
             return self.bidir_coef * self.hidden_size
 
-
     def forward(self, x, x_mask, return_list=False, x_additional=None):
         """
         Multi-layer Bi-RNN
@@ -174,21 +173,24 @@ class StackedBiRNN(nn.Module):
         else:
             return output
 
+
+# 计算注意力分数
 class AttentionScore(nn.Module):
     """
-    相关性计算方法：
+    相关函数score(x1, x2)计算方法：
         correlation_func = 1, sij = x1^Tx2
         correlation_func = 2, sij = (Wx1)D(Wx2)
         correlation_func = 3, sij = Relu(Wx1)DRelu(Wx2)
         correlation_func = 4, sij = x1^TWx2
         correlation_func = 5, sij = Relu(Wx1)DRelu(Wx2)
     """
+
     def __init__(self, input_size, hidden_size, correalition_func=1, do_similarity=False):
         super(AttentionScore, self).__init__()
         self.correlation_func = correalition_func
         self.hidden_size = hidden_size  # 隐状态维度，即U矩阵的行数
 
-        # 实现公式：score(x1, x2) = ReLU(Ux1)^TDReLU(Ux2)
+        # 实现公式：score(x1, x2) = ReLU(Ux1)^TDReLU(Ux2)。以下是矩阵U的初始设定
         if correalition_func == 2 or correalition_func == 3:
             self.linear = nn.Linear(input_size, hidden_size, bias=True)  # self.linear即矩阵U
             if do_similarity:  # do_similarity控制初始化参数是否除以维度的平方根（类似Transformer中的Attention），以及是否更新D的参数
@@ -198,7 +200,7 @@ class AttentionScore(nn.Module):
                 self.diagonal = Parameter(torch.ones(1, 1, hidden_size), requires_grad=True)
 
         if correalition_func == 4:
-            self.linear = nn.Linear(input_size, input_size, bias=False)
+            self.linear = nn.Linear(input_size, input_size, bias=False)  # 不含矩阵U，即不含隐状态
 
         if correalition_func == 5:
             self.linear = nn.Linear(input_size, hidden_size, bias=False)
@@ -208,9 +210,116 @@ class AttentionScore(nn.Module):
         计算x1和x2向量组的注意力分数
         :param x1: batch * word_num1 * dim
         :param x2: batch * word_num2 * dim
-        :return: batch * word_num1 * word_num2
+        :return: scores: batch * word_num1 * word_num2
         """
-        x1 = dropout()
+        x1 = dropout(x1, p=dropout_p, training=self.training)
+        x2 = dropout(x2, p=dropout_p, training=self.training)
+
+        x1_rep = x1
+        x2_rep = x2
+        batch = x1_rep.size(0)
+        word_num1 = x1_rep.size(1)
+        word_num2 = x2_rep.size(1)
+        dim = x1_rep.size(2)
+        # 计算x1_rep和x2_rep
+        if self.correlation_func == 2 or self.correlation_func == 3:
+            x1_rep = self.linear(x1_rep.contiguous().view(-1, dim)).view(batch, word_num1, self.hidden_size)
+            x2_rep = self.linear(x2_rep.contiguous().view(-1, dim)).view(batch, word_num2, self.hidden_size)
+            if self.correlation_func == 3:  # ReLU(Wx1)DReLU(Wx2)
+                x1_rep = F.relu(x1_rep)
+                x2_rep = F.relu(x2_rep)
+            # x1_rep is (W1D) or ReLU(Wx1)D and the shape is batch * word_num1 * dim(corr=1) or hidden_size(corr=2, 3)
+            x1_rep = x1_rep * self.diagonal.expand_as(x1_rep)
+
+        if self.correlation_func == 4:
+            x2_rep = self.linear(x2_rep.contiguous().view(-1, dim)).view(batch, word_num2, self.hidden_size)
+
+        if self.correlation_func == 5:
+            x1_rep = self.linear(x1_rep.contiguous().view(-1, dim)).view(batch, word_num1, self.hidden_size)
+            x2_rep = self.linear(x2_rep.contiguous().view(-1, dim)).view(batch, word_num2, self.hidden_size)
+            x1_rep = F.relu(x1_rep)
+            x2_rep = F.relu(x2_rep)
+
+        scores = x1_rep.bmm(x2_rep.transpose(1, 2))
+        return scores
+
+
+# 第2个类Attention类的输入为x1、x2和x3。它利用AttentionScore获得x1和x2的注意力分数，经softmax得到权重后，计算x3的加权和得到注意力向量
+class Attention(nn.Module):
+    def __init__(self, input_size, hidden_size, correlation_func=1, do_similarity=False):
+        super(Attention, self).__init__()
+        self.scoring = AttentionScore(input_size, hidden_size, correlation_func, do_similarity)
+
+    def forward(self, x1, x2, x2_mask, x3=None, drop_diagonal=False):
+        """
+        对于x1中的每个单词，使用在x1和x2之间计算出的分数，获得x3的注意力线性组合（即注意力向量）。如果x3不存在，则使用x2。
+        :param x1: batch * word_num1 * dim
+        :param x2: batch * word_num2 * dim
+        :param x2_mask: batch * word_num2
+        :param x3: if not None, batch * word_num2 * dim_3
+        :param drop_diagonal: 为True时，将对角线位置的注意力分数置为负无穷，即第i个元素和自身不计算注意力系数
+        :return: batch * word_num1 * dim_3
+        """
+        batch = x1.size(0)
+        word_num1 = x1.size(1)
+        word_num2 = x2.size(1)
+
+        if x3 is None:
+            x3 = x2
+
+        scores = self.scoring(x1, x2)  # 得到注意力分数scores
+
+        # 按照x2的掩码将所有补齐符号位置的注意力分数置为负无穷
+        empty_mask = x2_mask.eq(0).unsqueeze(1).expand_as(scores)
+        scores.data.masked_fill_(empty_mask.data, -float('inf'))
+
+        if drop_diagonal:
+            assert (scores.size(1) == scores.size(2))
+            diag_mask = torch.diag(scores.data.new(scores.size(1)).zero_() + 1).byte().unsqueeze(0).expand_as(scores)  # 将Tensor投射成byte类型
+            scores.data.masked_fill_(diag_mask, -float('inf'))
+
+        # 用softmax计算注意力分数，所有负无穷的位置获得系数0
+        alpha_flat = F.softmax(scores.view(-1, x2.size(1)), dim=1)
+        alpha = alpha_flat.view(-1, x1.size(1), x2.size(1))
+        # 将注意力系数与x3相乘得到注意力向量attented
+        attented = alpha.bmm(x3)
+        return attented
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

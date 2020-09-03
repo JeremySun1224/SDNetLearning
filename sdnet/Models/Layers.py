@@ -454,7 +454,7 @@ class DeepAttention(nn.Module):
         # abstr_list_cnt + 1为全关注注意力机制中计算注意力的次数
         # 每次基于全部单词历史计算注意力分数，然后对于其中的一层用加权和得到注意力向量
         for i in range(abstr_list_cnt + 1):
-            self.int_attn_list.append(Attention(att_size, deep_att_hidden_size_per_abstr, correlation_func=correlation_func))
+            self.int_attn_list.append(Attention(input_size=att_size, hidden_size=deep_att_hidden_size_per_abstr, correlation_func=correlation_func))
         rnn_input_size = abstr_hidden_size * abstr_list_cnt * 2 + (opt['highlvl_hidden_size'] * 2)
         self.rnn_input_size = rnn_input_size
 

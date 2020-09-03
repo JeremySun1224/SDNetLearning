@@ -305,7 +305,9 @@ def RNN_from_opt(input_size_, hidden_size_, num_layers=1, concat_rnn=False, add_
 
 
 """
-    如何将问题的所有单词向量转化为一个向量，这里使用到了含参加权和技术。
+    如何将问题的所有单词向量转化为一个向量，这里使用到了含参加权和技术。具体来说，LinearSelfAttn对于
+    一组向量(x1, x2, ..., xn)，定义参数向量b，然后计算每个向量的权重o_i = softmax(b^Tx_i)。
+    weighted_avg函数输出o_ix_i的加权和。
 """
 
 
@@ -332,6 +334,11 @@ class LinearSelfAttn(nn.Module):
         scores.data.masked_fill_(empty_mask.data, -float('inf'))  # 将补齐符号位置的权重重置为负无穷
         alpha = F.softmax(scores, dim=1)  # 计算softmax分数
         return alpha
+
+
+# 按照weights计算x的加权和
+def weighted_avg(x, weights):
+    return weights.unsqueeze(1).bmm(x).squeeze(1)
 
 
 def generate_mask(new_data, dropout_p=0.0):
@@ -382,7 +389,58 @@ class GetFinalScores(nn.Module):
     def __init__(self, x_size, h_size):
         super(GetFinalScores, self).__init__()
         # 预测“没有答案/否/是”所使用的参数向量
-        pass
+        self.noanswer_linear = nn.Linear(h_size, x_size)
+        self.noanswer_w = nn.Linear(x_size, 1, bias=True)
+        self.no_linear = nn.Linear(h_size, x_size)
+        self.no_w = nn.Linear(x_size, 1, bias=True)
+        self.yes_linear = nn.Linear(h_size, h_size)
+        self.yes_w = nn.Linear(x_size, 1, bias=True)
+        # 计算答案在文章中每个单词位置开始和结束的概率
+        self.attn = BilinearSeqAttn(x_size=x_size, y_size=h_size)
+        self.attn2 = BilinearSeqAttn(x_size=x_size, y_size=h_size)
+        # 计算开始和结束概率之间使用的GRU单元
+        self.rnn = nn.GRUCell(x_size, h_size)
+
+    # 计算预测“否/是/没有答案”的概率
+    def get_single_score(self, x, h, x_mask, linear, w):
+        # 将h转化为和x同维度的向量Wh
+        Wh = linear(h)  # batch * x_size
+        # 计算x和Wh的内积，即x^TWh
+        xWh = x.bmm(Wh.unsqueeze(2)).squeeze(2)  # batch * len
+        # 将x掩码指定的补齐符号的位置的xWh设为负无穷
+        empty_mask = x_mask.eq(0).expand_as(x_mask)
+        xWh.data.masked_fill_(empty_mask.data, -float('inf'))
+        # 以归一化后的xWh为权重计算x的加权和，得到一个向量attn_X
+        attn_x = torch.bmm(F.softmax(xWh, dim=1).unsqueeze(1), x)  # batch * 1 * x_size
+        # attn_x与w求内积得到输出分数
+        single_score = w(attn_x).squeeze(2)  # batch * 1
+        return single_score
+
+    def forward(self, x, h0, x_mask):
+        """
+        :param x: x是文章每个单词的最终向量表示，batch * len * x_size
+        :param h0: h0是问题向量，batch * h_size
+        :param x_mask: batch * len
+        :return: all scores
+        """
+        # 计算答案在文章中每个单词位置开始的概率score_s
+        score_s = self.attn(x, h0, x_mask)  # batch * len
+        # 利用score_s对文章单词向量做加权和，得到ptr_net_in
+        ptr_net_in = torch.bmm(F.softmax(score_s, dim=1).unsqueeze(1), x).squeeze(1)
+        ptr_net_in = dropout(ptr_net_in, p=dropout_p, training=self.training)
+        h0 = dropout(h0, p=dropout_p, training=self.training)
+        # 以ptr_net_in向量为输入，h0作为初始状态，经过GRU单元得到h1
+        h1 = self.rnn(ptr_net_in, h0)
+        # 计算答案在文章中每个单词位置结束的概率score_e
+        score_e = self.attn2(x, h1, x_mask)
+        # 计算预测“否/是/没有答案”的概率
+        score_no = self.get_single_score(x, h0, x_mask, self.no_linear, self.no_w)
+        score_yes = self.get_single_score(x, h0, x_mask, self.yes_linear, self.yes_w)
+        score_noanswer = self.get_single_score(x, h0, x_mask, self.noanswer_linear, self.noanswer_w)
+        return score_s, score_e, score_no, score_yes, score_noanswer
+
+
+
 
 
 

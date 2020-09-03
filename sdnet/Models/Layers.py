@@ -338,7 +338,7 @@ class LinearSelfAttn(nn.Module):
 
 # 按照weights计算x的加权和
 def weighted_avg(x, weights):
-    return weights.unsqueeze(1).bmm(x).squeeze(1)
+    return weights.unsqueeze(1).bmm(x).squeeze(1)  # bmm必须是三维Tensor
 
 
 def generate_mask(new_data, dropout_p=0.0):
@@ -413,7 +413,7 @@ class GetFinalScores(nn.Module):
         # 以归一化后的xWh为权重计算x的加权和，得到一个向量attn_X
         attn_x = torch.bmm(F.softmax(xWh, dim=1).unsqueeze(1), x)  # batch * 1 * x_size
         # attn_x与w求内积得到输出分数
-        single_score = w(attn_x).squeeze(2)  # batch * 1
+        single_score = w(attn_x).squeeze(2)  # batch * 1，这里的w是一个nn.Linear()
         return single_score
 
     def forward(self, x, h0, x_mask):
@@ -429,10 +429,8 @@ class GetFinalScores(nn.Module):
         ptr_net_in = torch.bmm(F.softmax(score_s, dim=1).unsqueeze(1), x).squeeze(1)
         ptr_net_in = dropout(ptr_net_in, p=dropout_p, training=self.training)
         h0 = dropout(h0, p=dropout_p, training=self.training)
-        # 以ptr_net_in向量为输入，h0作为初始状态，经过GRU单元得到h1
-        h1 = self.rnn(ptr_net_in, h0)
-        # 计算答案在文章中每个单词位置结束的概率score_e
-        score_e = self.attn2(x, h1, x_mask)
+        h1 = self.rnn(ptr_net_in, h0)  # 以ptr_net_in向量为输入，h0作为初始状态，经过GRU单元得到h1
+        score_e = self.attn2(x, h1, x_mask)  # 计算答案在文章中每个单词位置结束的概率score_e
         # 计算预测“否/是/没有答案”的概率
         score_no = self.get_single_score(x, h0, x_mask, self.no_linear, self.no_w)
         score_yes = self.get_single_score(x, h0, x_mask, self.yes_linear, self.yes_w)
@@ -440,58 +438,46 @@ class GetFinalScores(nn.Module):
         return score_s, score_e, score_no, score_yes, score_noanswer
 
 
+class DeepAttention(nn.Module):
+    """
+        全关注注意力层DeepAttention利用维度压缩技术从单词历史中得到注意力分数，然后只对中间的某些历史计算加权和，
+        这是SDNet的核心技术之一。
+    """
 
+    def __init__(self, opt, abstr_list_cnt, deep_att_hidden_size_per_abstr, correlation_func=1, word_hidden_size=None):
+        super(DeepAttention, self).__init__()
+        word_hidden_size = opt['embedding_dim'] if word_hidden_size is None else word_hidden_size
+        abstr_hidden_size = opt['hidden_size'] * 2
+        att_size = abstr_hidden_size * abstr_list_cnt + word_hidden_size
+        # 多个Attention层需要放入nn.ModuleList
+        self.int_attn_list = nn.ModuleList()
+        # abstr_list_cnt + 1为全关注注意力机制中计算注意力的次数
+        # 每次基于全部单词历史计算注意力分数，然后对于其中的一层用加权和得到注意力向量
+        for i in range(abstr_list_cnt + 1):
+            self.int_attn_list.append(Attention(att_size, deep_att_hidden_size_per_abstr, correlation_func=correlation_func))
+        rnn_input_size = abstr_hidden_size * abstr_list_cnt * 2 + (opt['highlvl_hidden_size'] * 2)
+        self.rnn_input_size = rnn_input_size
 
+        # 注意力计算完成后经过一个RNN层
+        self.rnn, self.output_size = RNN_from_opt(rnn_input_size, opt['highlvl_hidden_size'], num_layers=1)
+        self.opt = opt
 
+    def forward(self, x1_word, x1_abstr, x2_word, x2_abstr, x1_mask, x2_mask, return_bef_rnn=False):
+        """
+            x1_word, x2_word, x1_abstr, x2_abstr are list of 3D tensors.
+            3D tensor: batch_size * length * hidden_size
+        """
+        # 通过拼接得到文章和问题各自的单词历史
+        x1_att = torch.cat(x1_word + x1_abstr, 2)
+        x2_att = torch.cat(x2_word + x2_abstr[:-1], 2)
+        x1 = torch.cat(x1_abstr, 2)
+        x2_list = x2_abstr
+        for i in range(len(x2_list)):
+            attn_hiddens = self.int_attn_list[i](x1_att, x2_att, x2_mask, x3=x2_list[i])
+            x1 = torch.cat((x1, attn_hiddens), 2)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        x1_hiddens = self.rnn(x1, x1_mask)
+        if return_bef_rnn:
+            return x1_hiddens, x1
+        else:
+            return x1_hiddens

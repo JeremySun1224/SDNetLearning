@@ -444,7 +444,7 @@ class DeepAttention(nn.Module):
         这是SDNet的核心技术之一。
     """
 
-    def __init__(self, opt, abstr_list_cnt, deep_att_hidden_size_per_abstr, correlation_func=1, word_hidden_size=None):
+    def __init__(self, opt, abstr_list_cnt, deep_att_hidden_size_per_abstr, correlation_func=3, word_hidden_size=None):
         super(DeepAttention, self).__init__()
         word_hidden_size = opt['embedding_dim'] if word_hidden_size is None else word_hidden_size
         abstr_hidden_size = opt['hidden_size'] * 2

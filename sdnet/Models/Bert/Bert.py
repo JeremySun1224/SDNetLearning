@@ -49,11 +49,20 @@ class Bert(nn.Module):
     def forward(self, x_bert, x_bert_mask, x_bert_offset, x_mask):
         """
         :param x_bert: batch * max_bert_sent_len (ids)
-        :param x_bert_mask:
-        :param x_bert_offset:
-        :param x_mask:
-        :return:
+        :param x_bert_mask: batch * max_bert_sent_len (0/1)
+        :param x_bert_offset: batch * max_real_word_num * 2
+        :param x_mask: batch * max_real_word_num
+        :return: embedding: batch * max_real_word_num * bert_dim
         """
+        if self.linear_combine:
+            return self.combine_forward(x_bert, x_bert_mask, x_bert_offset, x_mask)
+
+        last_layers = []
+        bert_sent_len = x_bert.shape[1]  # 实际子词个数
+        # 每次处理self.BERT_MAX_LEN=512个子词
+        p = 0
+        while p < bert_sent_len:
+            all_encoder_layers, _ = self.bert_model
         
 
 

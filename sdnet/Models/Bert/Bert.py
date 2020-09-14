@@ -62,7 +62,34 @@ class Bert(nn.Module):
         # 每次处理self.BERT_MAX_LEN=512个子词
         p = 0
         while p < bert_sent_len:
-            all_encoder_layers, _ = self.bert_model
+            all_encoder_layers, _ = self.bert_model(
+                x_bert[:, p: (p + self.BERT_MAX_LEN)],
+                token_type_ids = None,
+                attention_mask = x_bert_mask[:, p: (p + self.BERT_MAX_LEN)]
+            )  # bert_layer * batch * max_bert_sent_len * bert_dim
+            last_layers.append(all_encoder_layers[-1])  # batch * up_to_512 * bert_dim
+            p += self.BERT_MAX_LEN
+        # 通过拼接得到文本所有单词的BERT编码
+        bert_embedding = torch.cat(last_layers, 1)
+
+        batch_size = x_mask.shape[0]
+        max_word_num = x_mask.shape[1]
+        output = Variable(torch.zeros(batch_size, max_word_num, self.bert_dim))
+        # 如果一个单词有T个子词，则将这个单词对应的所有子词每一层的编码除以T。这样进行求和后就可以直接得到单词的BERT编码
+        for i in range(batch_size):
+            for j in range(max_word_num):
+                if x_mask[i, j] == 0:
+                    continue
+                # 单词的所有子词在BERT分词中的位置范围为[st, ed)
+                st = x_bert_offset[i, j, 0]
+                ed = x_bert_offset[i, j, 1]
+                if st + 1 == ed:
+                    output[i, j, :] = bert_embedding[i. st, :]
+                else:
+                    
+
+
+
         
 
 

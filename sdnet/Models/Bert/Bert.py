@@ -24,7 +24,7 @@ class Bert(nn.Module):
         super(Bert, self).__init__()
         print('Loading BERT model...')
         self.BERT_MAX_LEN = 512
-        self.linear_combine = 'BERT_LINEAR_COMBINE' in opt
+        self.linear_combine = 'BERT_LINEAR_COMBINE' in opt  # True or False
 
         if 'BERT_LARGE' in opt:
             print('Using BERT Large model')
@@ -46,6 +46,44 @@ class Bert(nn.Module):
 
         print('Finished loading')
 
+    def combine_forward(self, x_bert, x_bert_mask, x_bert_offset, x_mask):
+        all_layers = []
+        bert_sent_len = x_bert.shape[1]
+        p = 0
+        while p < bert_sent_len:
+            all_encoder_layers, _ = self.bert_model(
+                x_bert[:, p: (p + self.BERT_MAX_LEN)],
+                token_type_ids=None,
+                attention_mask=x_bert_mask[:, p: (p + self.BERT_MAX_LEN)]
+            )
+            all_layers.append(torch.cat(all_encoder_layers, dim=2))
+            p += self.BERT_MAX_LEN
+
+        bert_embedding = torch.cat(all_layers, dim=1)
+        batch_size = x_mask.shape[0]
+        max_word_num = x_mask.shape[1]
+        tot_dim = bert_embedding.shape[2]
+        output = Variable(torch.zeros(batch_size, max_word_num, tot_dim))
+        for i in range(batch_size):
+            for j in range(max_word_num):
+                if x_mask[i, j] == 0:
+                    continue
+                st = x_bert_offset[i, j, 0]
+                ed = x_bert_offset[i, j, 1]
+                if st + 1 == ed:  # including st == ed
+                    output[i, j, :] = bert_embedding[i, st, :]
+                else:
+                    subword_ebd_sum = torch.sum(bert_embedding[i, st: ed, :], dim=0)
+                    if st < ed:
+                        output[i, j, :] = subword_ebd_sum / float(ed - st)  # dim 0 is st: ed
+        outputs = []
+        # 输出所有单词每一层的BERT编码
+        for i in range(self.bert_layer):
+            now = output[:, :, (i * self.bert_dim): ((i + 1) * self.bert_dim)]
+            now = now.cuda()
+            outputs.append(now)
+        return outputs
+
     def forward(self, x_bert, x_bert_mask, x_bert_offset, x_mask):
         """
         :param x_bert: batch * max_bert_sent_len (ids)
@@ -62,10 +100,11 @@ class Bert(nn.Module):
         # 每次处理self.BERT_MAX_LEN=512个子词
         p = 0
         while p < bert_sent_len:
+            # 得到BERT每一层的子词编码
             all_encoder_layers, _ = self.bert_model(
                 x_bert[:, p: (p + self.BERT_MAX_LEN)],
-                token_type_ids = None,
-                attention_mask = x_bert_mask[:, p: (p + self.BERT_MAX_LEN)]
+                token_type_ids=None,
+                attention_mask=x_bert_mask[:, p: (p + self.BERT_MAX_LEN)]
             )  # bert_layer * batch * max_bert_sent_len * bert_dim
             last_layers.append(all_encoder_layers[-1])  # batch * up_to_512 * bert_dim
             p += self.BERT_MAX_LEN
@@ -83,59 +122,12 @@ class Bert(nn.Module):
                 # 单词的所有子词在BERT分词中的位置范围为[st, ed)
                 st = x_bert_offset[i, j, 0]
                 ed = x_bert_offset[i, j, 1]
-                if st + 1 == ed:
-                    output[i, j, :] = bert_embedding[i. st, :]
+                if st + 1 == ed:  # including st == ed
+                    output[i, j, :] = bert_embedding[i, st, :]
                 else:
-                    
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                    subword_ebd_sum = torch.sum(bert_embedding[i, st: ed, :], dim=0)
+                    # 子词编码除以单词j对应的子词个数(ed - st)
+                    if st < ed:
+                        output[i, j, :] = subword_ebd_sum / float(ed - st)
+        output = output.cuda()
+        return output

@@ -141,7 +141,14 @@ class SDNetTrainer(BaseTrainer):
             self.log(['WARN: Saving failed...continuing anyway.'])
 
     def update(self, batch):
-        self.network.train()  # 进入训练模式
+        """
+            训练函数train()最后调用了前向计算函数update()。该函数根据批次数据batch中的内容直接与SDNet网络代码对接，
+            进行一次前向计算，然后计算交叉熵损失函数，利用PyTorch自带的反向传播函数backward求导并更新参数。由于
+            CoQA任务的答案可能是文章中的一段区间，也有可能是“是/否/没有答案”，因此update()对所有概率进行统一处理：
+            如果文章中有m个单词，update()根据网络输出层结果生成一个长度为m^2+3的向量SCOYes，表示答案是各种可能的
+            文章区间与3种特殊情况的概率。
+        """
+        self.network.train(1)  # 进入训练模式
         self.network.drop_emb = True
         # 从batch中获得文章、问题、答案的所有信息，包括单词编号、词性标注、BERT分词编号等
         x, x_mask, x_char, x_char_mask, x_features, x_pos, x_ent, x_bert, x_bert_mask, x_bert_offsets, \
@@ -154,14 +161,95 @@ class SDNetTrainer(BaseTrainer):
         score_s, score_e, score_yes, score_no, score_no_answer = self.network(
             x, x_mask, x_char, x_char_mask, x_features, x_pos, x_ent, x_bert, x_bert_mask, x_bert_offsets,
             query, query_mask, query_char, query_char_mask, query_bert, query_bert_mask, query_bert_offsets, len(context_words))
-        # 答案最长长度在配置文件中定义
+        # 答案最长长度在配置文件中有定义
         max_len = self.opt['max_len'] or score_s.size(1)
         batch_size = score_s.shape[0]
         context_len = score_s.size(1)
-        expand_score = gen_upper_triangle(score_s, score_e, max_len, self.use_cuda)
-        scores = torch.cat((expand_score, score_no, score_yes, score_no_answer), dim=1)
-        
+        expand_score = gen_upper_triangle(score_s, score_e, max_len, self.use_cuda)  # 区间答案的概率
+        # 将区间答案的概率与否/是/没有答案进行拼接
+        scores = torch.cat((expand_score, score_no, score_yes, score_no_answer), dim=1)  # batch * (context_len * context_len + 3)
+        # 标准答案的位置为转化成一维坐标，与expand_score对齐。例如：答案区间[3, 5]变成3*m+5, 否变成m*m, 是变成m*m+1, 没有答案变成m*m+2
+        targets = []
+        span_idx = int(context_len * context_len)
+        for i in range(ground_truth.shape[0]):
+            if ground_truth[i][0] == -1 and ground_truth[i][1] == -1:  # 没有答案
+                targets.append(span_idx + 2)
+            if ground_truth[i][0] == 0 and ground_truth[i][1] == -1:  # 否
+                targets.append(span_idx)
+            if ground_truth[i][0] == -1 and ground_truth[i][1] == 0:  # 是
+                targets.append(span_idx + 1)
+            if ground_truth[i][0] != -1 and ground_truth[i][1] != -1:  # 区间
+                targets.append(ground_truth[i][0] * context_len + ground_truth[i][1])
 
+        targets = torch.LongTensor(np.array(targets))
+        if self.use_cuda:
+            targets = targets.cuda()
+        loss = self.loss_func(input=scores, target=targets)  # 计算交叉熵损失函数
+        self.train_loss.update(loss.data[0], 1)
+        self.optimizer.zero_grad()  # 优化器将所有导数清零
+        loss.backward()  # 利用PyTorch自带的反向传播函数求导
+        torch.nn.utils.clip_grad_norm(parameters=self.network.parameters(), max_norm=self.opt['grad_clipping'])
+        self.optimizer.step()  # 更新参数
+        self.updates += 1
+        if 'TUNE_PARTIAL' in self.opt:
+            self.network.vocab_embed.weight.data[self.opt['tune_partial']:] = self.network.fixed_embedding
+
+    def predict(self, batch):
+        """
+            SDNet每更新1500个batch就会利用测试函数predict()在验证集上预测答案并计算准确率得分。predict()函数
+            的流程与update()函数类似，也要进行一次前向计算得到网络输出结果。之后，模型在所有可能的答案中选择概率
+            最大的作为预测结果。最终输出包括预测答案和对应的概率，并按照CoQA的要求输出JSON格式的结果。
+        """
+        self.network.eval()  # 将网络设置成测试模式，即不计算导数、不进行Dropout等操作
+        self.network.drop_emb = False
+        # 与update()函数类似，前向计算得到网络预测结果
+        x, x_mask, x_char, x_char_mask, x_features, x_pos, x_ent, x_bert, x_bert_mask, x_bert_offsets, \
+        query, query_mask, query_char, query_char_mask, query_bert, query_bert_mask, query_bert_offsets, \
+        ground_truth, context_str, context_words, context_word_offsets, answers, context_id, turn_ids = batch
+        context_len = len(context_words)
+        score_s, score_e, score_yes, score_no, score_no_answer = self.network(
+            x, x_mask, x_char, x_char_mask, x_features, x_pos, x_ent, x_bert, x_bert_mask, x_bert_offsets,
+            query, query_mask, query_char, query_char_mask, query_bert, query_bert_mask, query_bert_offsets, len(context_words)
+        )
+        batch_size = score_s.shape[0]
+        max_len = self.opt['max_len'] or score_s.size(1)
+        # 与update()函数类似，得到大小为m*m+3的一维概率向量
+        expand_score = gen_upper_triangle(score_s, score_e, max_len, self.use_cuda)
+        scores = torch.cat((expand_score, score_no, score_yes, score_no_answer), dim=1)  # batch * (m * m + 3)
+        prob = F.softmax(scores, dim=1).data.cpu()  # 将结果存入CPU，方便NumPy操作
+        predictions = []  # 存储预测的答案字符串
+        confidence = []  # 存储预测的概率
+        pred_json = []  # 存储JSON格式的答案
+        for i in range(batch_size):
+            _, ids = torch.sort(prob[i, :], descending=True)  # 对第i个答案的所有可能解的概率从大到小排序，只取索引
+            idx = 0
+            best_id = ids[idx]  # best_id是概率最大答案的下标，在0到m*m+2之间
+            confidence.append(float(prob[i, best_id]))
+            # 处理答案是区间的情况，将best_id还原成开始位置st和结束位置ed
+            if best_id < context_len * context_len:
+                st = best_id / context_len
+                ed = best_id % context_len
+                # context_word_offsets提供每个词的第一个字符和最后一个字符在文章中的位置
+                st = context_word_offsets[st][0]
+                ed = context_word_offsets[ed][1]
+                # 获得预测的答案字符串
+                predictions.append(context_str[st: ed])
+            # 处理答案为“否”的情况
+            if best_id == context_len * context_len:
+                predictions.append('no')
+            # 处理答案为“是”的情况
+            if best_id == context_len * context_len + 1:
+                predictions.append('yes')
+            # 处理“没有答案”的情况
+            if best_id == context_len * context_len + 2:
+                predictions.append('unknown')
+            # 记录JSON格式的输出
+            pred_json.append({
+                'id': context_id,
+                'turn_id': turn_ids[i],
+                'answer': predictions[-1]
+            })
+        return (predictions, confidence, pred_json)  # list of strings, list of floats, list of jsons
 
     def train(self):
         """

@@ -17,3 +17,6 @@ def gen_upper_triangle(score_s, score_e, max_len, use_cuda):
     empty_mask = score_mask.eq(0).unsqueeze(0).expand_as(expand_score)
     expand_score.data.masked_fill_(empty_mask.data, -float('inf'))
     return expand_score.contiguous().view(batch_size, -1)  # batch x context_len x context_len
+
+
+

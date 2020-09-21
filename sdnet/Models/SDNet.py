@@ -158,7 +158,36 @@ class SDNet(nn.Module):
         # 分数输出层
         self.get_answer = GetFinalScores(x_size=context_final_size, h_size=ques_final_size)
 
-
+    def forward(self, x, x_single_mask, x_char, x_char_mask, x_features, x_pos, x_ent, x_bert, x_bert_mask, x_bert_offsets,
+                q, q_mask, q_char, q_char_mask, q_bert, q_bert_mask, q_bert_offsets, context_len):
+        """
+        forward()前向计算函数以BatchGen()产生的批次数据作为输入，经过编码层、交互层和输出层计算得到最终的打分结果
+        :param x: [1, x_len] (word_ids)
+        :param x_single_mask: [1, x_len]
+        :param x_char: [1, x_len, char_len] (char_ids)
+        :param x_char_mask: [1, x_len, char_len]
+        :param x_features: [batch_size, x_len, feature_len] (5 if answer_span_in_context_feature 4 otherwise)
+        :param x_pos: [1, x_len] (POS id)
+        :param x_ent: [1, x_len] (ENT id)
+        :param x_bert: [1, x_bert_token_len]
+        :param x_bert_mask: [1, x_bert_token_len]
+        :param x_bert_offsets: [1, x_len, 2]
+        :param q: [batch, q_len] (word_ids)
+        :param q_mask: [batch, q_len]
+        :param q_char: [batch, q_len, char_len] (char ids)
+        :param q_char_mask: [batch, q_len, char_len]
+        :param q_bert: [1, q_bert_token_len]
+        :param q_bert_mask: [1, q_bert_token_len]
+        :param q_bert_offsets: [1, q_len, 2]
+        :param context_len: number of words in context (only one per batch)
+        :return:
+            score_s: [batch, context_len]
+            score_e: [batch, context_len]
+            score_no: [batch, 1]
+            score_yes: [batch, 1]
+            score_noanswer: [batch, 1]
+        """
+        
 
 
 

@@ -319,7 +319,7 @@ class LinearSelfAttn(nn.Module):
 
     def __init__(self, input_size):
         super(LinearSelfAttn, self).__init__()
-        self.linear = nn.Linear(input_size, 1)  # self.linear即参数向量b
+        self.linear = nn.Linear(in_features=input_size, out_features=1)  # self.linear即参数向量b
 
     def forward(self, x, x_mask):
         """
@@ -410,10 +410,10 @@ class GetFinalScores(nn.Module):
         # 将x掩码指定的补齐符号的位置的xWh设为负无穷
         empty_mask = x_mask.eq(0).expand_as(x_mask)
         xWh.data.masked_fill_(empty_mask.data, -float('inf'))
-        # 以归一化后的xWh为权重计算x的加权和，得到一个向量attn_X
+        # 以归一化后的xWh为权重计算x的加权和，得到一个向量attn_x
         attn_x = torch.bmm(F.softmax(xWh, dim=1).unsqueeze(1), x)  # batch * 1 * x_size
         # attn_x与w求内积得到输出分数
-        single_score = w(attn_x).squeeze(2)  # batch * 1，这里的w是一个nn.Linear()
+        single_score = w(attn_x).squeeze(2)  # batch * 1, 这里的w是一个nn.Linear()
         return single_score
 
     def forward(self, x, h0, x_mask):
@@ -454,7 +454,8 @@ class DeepAttention(nn.Module):
         # abstr_list_cnt + 1为全关注注意力机制中计算注意力的次数
         # 每次基于全部单词历史计算注意力分数，然后对于其中的一层用加权和得到注意力向量
         for i in range(abstr_list_cnt + 1):
-            self.int_attn_list.append(Attention(input_size=att_size, hidden_size=deep_att_hidden_size_per_abstr, correlation_func=correlation_func))
+            self.int_attn_list.append(
+                Attention(input_size=att_size, hidden_size=deep_att_hidden_size_per_abstr, correlation_func=correlation_func))
         rnn_input_size = abstr_hidden_size * abstr_list_cnt * 2 + (opt['highlvl_hidden_size'] * 2)
         self.rnn_input_size = rnn_input_size
 

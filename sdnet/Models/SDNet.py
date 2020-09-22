@@ -308,12 +308,12 @@ class SDNet(nn.Module):
 
     # 对BERT每层的输出计算加权和
     def linear_sum(self, output, alpha, gamma):
-        alpha_softmax = F.softmax(alpha)
+        alpha_softmax = F.softmax(alpha)  # 对alpha权重归一化
         for i in range(len(output)):
-            t = output[i] * alpha_softmax[i] * gamma
+            t = output[i] * alpha_softmax[i] * gamma  # 第i层的权重系数是alpha_softmax[i] * gamma
             if i == 0:
                 res = t
             else:
                 res += t
-        res = dropout(x=res, p=self.opt['dropout_emb'], training=self.drop_emb)
+        res = dropout(x=res, p=self.opt['dropout_emb'], training=self.drop_emb)  # Dropout后输出
         return res

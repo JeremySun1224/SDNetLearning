@@ -187,65 +187,133 @@ class SDNet(nn.Module):
             score_yes: [batch, 1]
             score_noanswer: [batch, 1]
         """
-        
+        batch_size = q.shape[0]
+        # 由于同一个batch中的问答共享一篇文章，x_single_mask只有一行，这里将x_single_mask重复batch_size行，与问题数据对齐
+        x_mask = x_single_mask.expand(batch_size, -1)
+        # 获得文章单词编码，同样重复batch_size行
+        x_word_embed = self.vocab_embed(x).expand(batch_size, -1, -1)  # [batch, x_len, vocab_dim]
+        # 获得问题单词编码
+        ques_word_embed = self.vocab_embed(q)  # [batch, q_len, vocab_dim]
+        # 文章单词历史
+        x_input_list = [dropout(x=x_word_embed, p=self.opt['dropout_emb'], training=self.drop_emb)]  # [batch, x_len, vocab_dim]
+        # 问题单词历史
+        ques_input_list = [dropout(x=x_word_embed, p=self.opt['dropout_emb'], training=self.drop_emb)]  # [batch, q_len, vocab_dim]
+        # 上下文编码层
+        x_cemb = ques_cemb = None
+        if 'BERT' in self.opt:
+            x_cemb = ques_cemb = None
 
+            if 'BERT_LINEAR_COMBINE' in self.opt:
+                # 得到BERT每一层输出的文章单词编码
+                x_bert_output = self.Bert(x_bert, x_bert_mask, x_bert_offsets, x_single_mask)
+                # 计算加权和
+                x_cemb_mid = self.linear_sum(x_bert_output, self.alphaBERT, self.gammaBERT)
+                # 得到BERT每一层输出的问题单词编码
+                ques_bert_output = self.Bert(q_bert, q_bert_mask, q_bert_offsets, q_mask)
+                # 计算加权和
+                ques_cemb_mid = self.linear_sum(ques_bert_output, self.alphaBERT, self.gammaBERT)
+                x_cemb_mid = x_cemb_mid.expand(batch_size, -1, -1)
+            else:
+                # 不计算加权和的情况
+                x_cemb_mid = self.Bert(x_bert, x_bert_mask, x_bert_offsets, x_single_mask)
+                x_cemb_mid = x_cemb_mid.expand(batch_size, -1, -1)
+                ques_cemb_mid = self.Bert(q_bert, q_bert_mask, q_bert_offsets, q_mask)
 
+            # 上下文编码加入单词历史
+            x_input_list.append(x_cemb_mid)
+            ques_input_list.append(ques_cemb_mid)
 
+        if 'CHAR_CNN' in self.opt:
+            x_char_final = self.character_cnn(x_char, x_char_mask)
+            x_char_final = x_char_final.expand(batch_size, -1, -1)
+            ques_char_final = self.character_cnn(q_char, q_char_mask)
+            x_input_list.append(x_char_final)
+            ques_input_list.append(ques_char_final)
 
+        # 单词注意力层
+        x_prealign = self.pre_align(x_word_embed, ques_word_embed, q_mask)
+        x_input_list.append(x_prealign)  # [batch, x_len, vocab_dim + cdim + vocab_dim]
+        # 词性编码
+        x_pos_emb = self.pos_embedding(x_pos).expand(batch_size, -1, -1)  # [batch, x_len, pos_dim]
+        # 命名实体编码
+        x_ent_emb = self.ent_embedding(x_ent).expand(batch_size, -1, -1)  # [batch, x_len, ent_dim]
+        x_input_list.append(x_pos_emb)
+        x_input_list.append(x_ent_emb)
+        # 加入文章单词的词频和精确匹配特征
+        x_input_list.append(x_features)  # [batch_size, x_len, vocab_dim + cdim + vocab_dim + pos_dim, ent_dim, feature_dim]
+        # 将文章答案的单词历史向量拼接起来
+        x_input = torch.cat(x_input_list, 2)  # [batch_size, x_len, vocab_dim + cdim + vocab_dim + pos_dim + ent_dim + feature_dim]
+        # 将问题答案的单词历史响铃拼接起来
+        ques_input = torch.cat(ques_input_list, 2)  # [batch_size, q_len, vocab_dim + cdim]
+        # Multi-layer RNN, 获得文章和问题RNN层的输出
+        _, x_rnn_layers = self.context_rnn(x_input, x_mask, return_list=True, x_additional=x_cemb)  # [layer, batch, x_len, context_rnn_output_size]
+        _, ques_rnn_layers = self.ques_rnn(ques_input, q_mask, return_list=True, x_additional=ques_cemb)  # [layer, batch, q_len, ques_rnn_output_size]
+        # 问题理解层
+        ques_highlvl = self.high_lvl_ques_rnn(torch.cat(ques_rnn_layers, 2), q_mask)  # [batch, q_len, high_lvl_ques_rnn_output_size]
+        ques_rnn_layers.append(ques_highlvl)  # (layer + 1) layers
 
+        # deep multilevel inter-attention, 全关注互注意力层的输入
+        if x_cemb is None:
+            x_long = x_word_embed
+            ques_long = ques_word_embed
+        else:
+            x_long = torch.cat([x_word_embed, x_cemb], 2)  # [batch, x_len, vocab_dim + cdim]
+            ques_long = torch.cat([ques_word_embed, ques_cemb], 2)  # [batch, q_len, vocab_dim + cdim]
+        # 文章单词经过全关注互注意力层, x_rnn_after_inter_attn: [batch, x_len, deep_attn_output_size], x_inter_attn: [batch, x_len, deep_attn_input_size]
+        x_rnn_after_inter_attn, x_inter_attn = self.deep_attn([x_long], x_rnn_layers, [ques_long], ques_rnn_layers, x_mask, q_mask, return_bef_rnn=True)
 
+        # deep self attention, 全关注自注意力层的输入, x_self_attn_input: [batch, x_len, deep_attn_output_size + deep_attn_input_size + cdim + vocab_dim]
+        if x_cemb is None:
+            x_self_attn_input = torch.cat([x_rnn_after_inter_attn, x_inter_attn, x_word_embed], 2)
+        else:
+            x_self_attn_input = torch.cat([x_rnn_after_inter_attn, x_inter_attn, x_cemb, x_word_embed], 2)
+        # 文章经过全关注自注意力层
+        x_self_attn_output = self.highlvl_self_attn(x_self_attn_input, x_self_attn_input, x_mask, x3=x_rnn_after_inter_attn,
+                                                    drop_diagonal=True)  # [batch, x_len, deep_attn_output_size]
 
+        # 文章单词经过高级RNN层
+        x_highlvl_output = self.high_lvl_context_rnn(torch.cat([x_rnn_after_inter_attn, x_self_attn_output], 2), x_mask)
 
+        # 文章单词的最终编码x_final
+        x_final = x_highlvl_output  # [batch, x_len, high_lvl_context_rnn_output_size]
 
+        # 问题单词的自注意力层
+        ques_final = self.ques_self_attn(ques_highlvl, ques_highlvl, q_mask, x3=None, drop_diagonal=True)  # [batch, q_len, high_lvl_ques_rnn_output_size]
 
+        # merge questions, 获得问题的向量表示
+        q_merge_weights = self.ques_merger(ques_final, q_mask)
+        ques_merged = weighted_avg(ques_final, q_merge_weights)  # [batch, ques_final_size], 按照q_merge_weights计算ques_final的加权和
 
+        # 获得答案在文章每个位置开始和结束的概率以及三种特殊答案“是/否/没有答案”的概率
+        score_s, score_e, score_no, score_yes, score_noanswer = self.get_answer(x_final, ques_merged, x_mask)
 
+        return score_s, score_e, score_no, score_yes, score_noanswer
 
+    def character_cnn(self, x_char, x_char_mask):
+        """
+        :param x_char: [batch, word_num, char_num]
+        :param x_char_mask: [batch, word_num, char_num]
+        :return: [batch, word_num, char_cnn_hidden_size]
+        """
+        x_char_embed = self.char_embed(x_char)  # [batch, word_num, char_num, char_dim]
+        batch_size = x_char_embed.shape[0]
+        word_num = x_char_embed.shape[1]
+        char_num = x_char_embed.shape[2]
+        char_dim = x_char_embed.shape[3]
+        # x_char_cnn: [batch * word_num, char_num, char_cnn_hidden_size]
+        x_char_cnn = self.char_cnn(x_char_embed.contiguous().view(-1, char_num, char_dim), x_char_mask)
+        # x_char_cnn_final: [batch, word_num, char_cnn_hidden_size]
+        x_char_cnn_final = self.maxpooling(x_char_cnn, x_char_mask.contiguous().view(-1, char_num)).contiguous().view(batch_size, word_num, -1)
+        return x_char_cnn_final
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    # 对BERT每层的输出计算加权和
+    def linear_sum(self, output, alpha, gamma):
+        alpha_softmax = F.softmax(alpha)
+        for i in range(len(output)):
+            t = output[i] * alpha_softmax[i] * gamma
+            if i == 0:
+                res = t
+            else:
+                res += t
+        res = dropout(x=res, p=self.opt['dropout_emb'], training=self.drop_emb)
+        return res

@@ -1,0 +1,5 @@
+torch==0.4.1
+numpy==1.19.0
+spacy==2.0.16
+tqdm==4.47.0
+msgpack_python==0.5.6

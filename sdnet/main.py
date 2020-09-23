@@ -10,4 +10,5 @@ from Models.SDNetTrainer import SDNetTrainer
 from Utils.Arguments import Arguments
 
 opt = None
-    
+
+parser = argparse.ArgumentParser(description='SDNet')

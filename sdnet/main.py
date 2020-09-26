@@ -4,7 +4,6 @@
 
 import argparse  # argparse可以让我们直接在命令行中就可以向程序中传入参数并让程序运行
 import os
-import sys
 import torch
 from Models.SDNetTrainer import SDNetTrainer
 from Utils.Arguments import Arguments

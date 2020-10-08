@@ -11,7 +11,7 @@ from Models.Bert.modeling import BertModel
 
 """
     Bert在SDNet中的使用，包括子词编码平均等功能。Bert.py实现了BERT上下文编码的生成过程。在BatchGen中，
-    每个单词宝贝Bert自带的WordPiece工具分成若干个子词。BERT预训练模型为每个子词生成多层上下文编码。SDNet
+    每个单词被Bert自带的WordPiece工具分成若干个子词。BERT预训练模型为每个子词生成多层上下文编码。SDNet
     模型将一个词对应的所有子词的每一层上下文编码求平均，从而得到这个单词在每一层的编码。
     
     此外，BERT的预训练模型只能接收长度为512个子词的输入。但是CoQA中的一部分文章超出了这个限制。所以，模型

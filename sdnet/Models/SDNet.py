@@ -243,7 +243,7 @@ class SDNet(nn.Module):
         x_input_list.append(x_features)  # [batch_size, x_len, vocab_dim + cdim + vocab_dim + pos_dim, ent_dim, feature_dim]
         # 将文章答案的单词历史向量拼接起来
         x_input = torch.cat(x_input_list, 2)  # [batch_size, x_len, vocab_dim + cdim + vocab_dim + pos_dim + ent_dim + feature_dim]
-        # 将问题答案的单词历史响铃拼接起来
+        # 将问题答案的单词历史向量拼接起来
         ques_input = torch.cat(ques_input_list, 2)  # [batch_size, q_len, vocab_dim + cdim]
         # Multi-layer RNN, 获得文章和问题RNN层的输出
         _, x_rnn_layers = self.context_rnn(x_input, x_mask, return_list=True, x_additional=x_cemb)  # [layer, batch, x_len, context_rnn_output_size]
